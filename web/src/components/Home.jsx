@@ -12,6 +12,26 @@ function getTodayStartEnd() {
   return { start: start.toISOString(), end: end.toISOString() }
 }
 
+function todayKey() {
+  const d = new Date()
+  return d.toISOString().slice(0, 10) // YYYY-MM-DD
+}
+function cacheKey(userId) {
+  return `frases_cache_${userId}_${todayKey()}`
+}
+function loadCache(userId) {
+  try {
+    const raw = localStorage.getItem(cacheKey(userId))
+    return raw ? JSON.parse(raw) : null
+  } catch { return null }
+}
+function saveCache(userId, frases) {
+  try {
+    const payload = { date: todayKey(), frases }
+    localStorage.setItem(cacheKey(userId), JSON.stringify(payload))
+  } catch {}
+}
+
 export default function Home() {
   const [frases, setFrases] = useState([])
   const [loading, setLoading] = useState(true)
@@ -36,7 +56,16 @@ export default function Home() {
           .order('visto_em', { ascending: true })
 
         const vistasHoje = vistasHojeList?.length ?? 0
-        setJaViuHoje(vistasHoje)
+        if (!cancelled) setJaViuHoje(vistasHoje)
+
+        const cached = loadCache(user.id)
+        if (cached && Array.isArray(cached.frases) && cached.frases.length > 0) {
+          if (!cancelled) {
+            setFrases(cached.frases)
+            setLoading(false)
+          }
+          return
+        }
 
         if (vistasHoje >= MAX_FRASES_POR_DIA) {
           const idsHoje = (vistasHojeList || []).map((v) => v.frase_id)
@@ -48,10 +77,13 @@ export default function Home() {
             if (!errFrases && frasesHoje?.length) {
               const ordem = new Map(idsHoje.map((id, i) => [id, i]))
               const ordenadas = [...frasesHoje].sort((a, b) => (ordem.get(a.id) ?? 0) - (ordem.get(b.id) ?? 0))
-              if (!cancelled) setFrases(ordenadas)
+              if (!cancelled) {
+                setFrases(ordenadas)
+                saveCache(user.id, ordenadas)
+              }
             }
           }
-          setLoading(false)
+          if (!cancelled) setLoading(false)
           return
         }
 
@@ -67,28 +99,30 @@ export default function Home() {
           .select('id, frase')
 
         if (errList || !todasFrases?.length) {
-          setError(errList?.message || 'Nenhuma frase disponível.')
-          setLoading(false)
+          if (!cancelled) {
+            setError(errList?.message || 'Nenhuma frase disponível.')
+            setLoading(false)
+          }
           return
         }
 
         const disponiveis = todasFrases.filter((f) => !idsVistos.has(f.id))
         const shuffled = [...disponiveis].sort(() => Math.random() - 0.5)
-        const escolhidas = shuffled.slice(0, Math.min(MAX_FRASES_POR_DIA - vistasHoje, 3))
+        const need = Math.min(MAX_FRASES_POR_DIA - vistasHoje, MAX_FRASES_POR_DIA)
+        const escolhidas = shuffled.slice(0, need)
 
         if (escolhidas.length === 0) {
-          setLoading(false)
+          if (!cancelled) setLoading(false)
           return
         }
 
-        for (const f of escolhidas) {
-          await supabase.from('frases_vistas').insert({
-            user_id: user.id,
-            frase_id: f.id,
-          })
-        }
+        const toInsert = escolhidas.map((f) => ({ user_id: user.id, frase_id: f.id }))
+        await supabase.from('frases_vistas').insert(toInsert)
 
-        if (!cancelled) setFrases(escolhidas)
+        if (!cancelled) {
+          setFrases(escolhidas)
+          saveCache(user.id, escolhidas)
+        }
       } catch (e) {
         if (!cancelled) setError(e.message || 'Erro ao carregar frases.')
       } finally {
